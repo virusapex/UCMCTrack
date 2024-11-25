@@ -1,192 +1,155 @@
 import argparse
 import cv2
 import numpy as np
-import copy
-
-class CameraPara:
-
-    def open(self,file):
-
-        # 读取文件
-        with open(file, 'r') as f:
-            data = f.readlines()
-
-        # 从文件中读取旋转矩阵
-        R = []
-        for i in range(1, 4):
-            row = data[i].split()
-            R.append([float(x) for x in row])
-        R = np.array(R)
-
-        # 从文件中读取平移向量
-        T = []
-        for i in range(6, 7):
-            row = data[i].split()
-            T.append([float(x)/1000.0 for x in row])
-        T = np.array(T)
-
-        self.Ko = np.column_stack((R, T.T))
-        self.Ko = np.row_stack((self.Ko, np.array([0,0,0,1])))
-
-        # 从文件中读取内参矩阵
-        Ki = []
-        for i in range(9, 12):
-            row = data[i].split()
-            Ki.append([float(x) for x in row])
-        self.Ki =  np.array(Ki)
-        # 在self.Ki中添加一列[0,0,0]
-        self.Ki = np.column_stack((self.Ki, np.array([0,0,0])))
-
-    def xy2uv(self,x,y):
-        # 计算uv
-        uv = np.dot(self.Ki, np.dot(self.Ko, np.array([x,y,0,1])))
-        # 归一化
-        uv = uv/uv[2]
-        return int(uv[0]), int(uv[1])
-    
-
-def xy2uv(x,y,Ki,Ko):
-    # 计算uv
-    uv = np.dot(Ki, np.dot(Ko, np.array([x,y,0,1])))
-    # 归一化
-    uv = uv/uv[2]
-    return int(uv[0]), int(uv[1])
 
 
-# 定义转换函数
-def get_real_theta(value):
-    return (value - 250) / 10.0
+class CameraParameterAdjuster:
+    def __init__(self, img, output_file):
+        self.output_file = output_file
+        self.original_img = img
+        self.height, self.width = img.shape[:2]
 
-def get_real_theta_z(value):
-    return (value - 500) / 5.0
+        # Initialize intrinsic matrix Ki
+        self.Ki = np.array([
+            [1000,    0, self.width / 2],
+            [   0, 1000, self.height / 2],
+            [   0,    0,             1]
+        ])
 
-def get_real_focal(value):
-    return (value - 100) * 5
+        # Add an extra column of zeros to Ki for compatibility
+        self.Ki = np.hstack((self.Ki, np.zeros((3, 1))))
 
-def get_real_transition(value):
-    return (value-30) * 0.04
+        # Initialize extrinsic matrix Ko as identity
+        self.Ko = np.eye(4)
 
-# 定义滑动条回调函数
+        # Parameters initialized to default values
+        self.theta_x = 0
+        self.theta_y = 0
+        self.theta_z = 0
+        self.focal = 0
+        self.tz = 0
 
-def update_value_display():
-    global value_display,g_theta_x,g_theta_y,g_theta_z,g_focal,g_tz
-    value_display.fill(0)  # 清空图像
-    text = f"theta_x: {g_theta_x:.2f}"
-    cv2.putText(value_display, text, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 1, 255, 2)
-    text = f"theta_y: {g_theta_y:.2f}"
-    cv2.putText(value_display, text, (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 1, 255, 2)
-    text = f"theta_z: {g_theta_z:.2f}"
-    cv2.putText(value_display, text, (10, 180), cv2.FONT_HERSHEY_SIMPLEX, 1, 255, 2)
-    text = f"focal: {g_focal}"
-    cv2.putText(value_display, text, (10, 240), cv2.FONT_HERSHEY_SIMPLEX, 1, 255, 2)
-    text = f"Tz: {g_tz:.2f}"
-    cv2.putText(value_display, text, (10, 300), cv2.FONT_HERSHEY_SIMPLEX, 1, 255, 2)
-    cv2.imshow('Values', value_display)
+        self.setup_ui()
 
-def on_theta_x_change(value):
-    global g_theta_x
-    g_theta_x = get_real_theta(value)
-    update_value_display()
-    
-def on_theta_y_change(value):
-    global g_theta_y
-    g_theta_y = get_real_theta(value)
-    update_value_display()
+    def setup_ui(self):
+        cv2.namedWindow('Values')
+        cv2.namedWindow('CamParaSettings')
 
-def on_theta_z_change(value):
-    global g_theta_z
-    g_theta_z = get_real_theta_z(value)
-    update_value_display()
+        # Create trackbars
+        cv2.createTrackbar('theta_x', 'CamParaSettings', 250, 500, self.update_theta_x)
+        cv2.createTrackbar('theta_y', 'CamParaSettings', 250, 500, self.update_theta_y)
+        cv2.createTrackbar('theta_z', 'CamParaSettings', 500, 1000, self.update_theta_z)
+        cv2.createTrackbar('focal', 'CamParaSettings', 100, 500, self.update_focal)
+        cv2.createTrackbar('Tz', 'CamParaSettings', 30, 500, self.update_tz)
 
-def on_focal_change(value):
-    global g_focal
-    g_focal = get_real_focal(value)
-    update_value_display()
+    def update_theta_x(self, val):
+        self.theta_x = (val - 250) / 10.0
+        self.display_values()
 
-def on_tz_change(value):
-    global g_tz
-    g_tz = get_real_transition(value)
-    update_value_display()
+    def update_theta_y(self, val):
+        self.theta_y = (val - 250) / 10.0
+        self.display_values()
 
-cv2.namedWindow('Values')
-# 初始化一个空白图像来显示实际值
-value_display = np.zeros((400, 300), dtype=np.uint8)
-g_theta_x = 0
-g_theta_y = 0
-g_theta_z = 0
-g_focal = 0
-g_tz = 0
+    def update_theta_z(self, val):
+        self.theta_z = (val - 500) / 5.0
+        self.display_values()
 
-def main(args):
+    def update_focal(self, val):
+        self.focal = (val - 100) * 5
+        self.display_values()
 
-    cam_para = CameraPara()
-    cam_para.open(args.cam_para)
+    def update_tz(self, val):
+        self.tz = (val - 30) * 0.04
+        self.display_values()
 
-    img = cv2.imread(args.img)
-    # 获取img的大小
-    height, width = img.shape[:2]
+    def display_values(self):
+        display_img = np.zeros((400, 300), dtype=np.uint8)
+        params = [
+            f"theta_x: {self.theta_x:.2f}",
+            f"theta_y: {self.theta_y:.2f}",
+            f"theta_z: {self.theta_z:.2f}",
+            f"focal: {self.focal}",
+            f"Tz: {self.tz:.2f}"
+        ]
+        for idx, text in enumerate(params):
+            cv2.putText(display_img, text, (10, 60 * (idx + 1)), cv2.FONT_HERSHEY_SIMPLEX, 1, 255, 2)
+        cv2.imshow('Values', display_img)
 
-    cv2.namedWindow('CamParaSettings')
-    # 添加ui界面来修改theta_x,theta_y,theta_z, 调节访问是-10到10，间隔0.2
-    cv2.createTrackbar('theta_x', 'CamParaSettings', 250,500, on_theta_x_change)
-    cv2.createTrackbar('theta_y', 'CamParaSettings', 250,500, on_theta_y_change)
-    cv2.createTrackbar('theta_z', 'CamParaSettings', 500,1000, on_theta_z_change)
-    cv2.createTrackbar('focal', 'CamParaSettings', 100,500, on_focal_change)
-    cv2.createTrackbar('Tz', 'CamParaSettings', 30,500, on_tz_change)
+    def compute_uv(self, x, y, Ki, Ko):
+        uvw = Ki @ Ko @ np.array([x, y, 0, 1])
+        uv = uvw[:2] / uvw[2]
+        return tuple(map(int, uv))
 
-    global g_theta_x,g_theta_y,g_theta_z
+    def run(self):
+        while True:
+            Ki = self.Ki.copy()
+            Ko = self.Ko.copy()
 
-    # 循环一直到按下q键
-    while True:
-        theta_x = g_theta_x/180.0*np.pi
-        theta_y = g_theta_y/180.0*np.pi
-        theta_z = g_theta_z/180.0*np.pi
-        Ki = copy.copy(cam_para.Ki)
-        Ko = copy.copy(cam_para.Ko)
-        R = Ko[0:3,0:3]
-        Rx = np.array([[1,0,0],[0,np.cos(theta_x),-np.sin(theta_x)],[0,np.sin(theta_x),np.cos(theta_x)]])
-        Ry = np.array([[np.cos(theta_y),0,np.sin(theta_y)],[0,1,0],[-np.sin(theta_y),0,np.cos(theta_y)]])
-        Rz = np.array([[np.cos(theta_z),-np.sin(theta_z),0],[np.sin(theta_z),np.cos(theta_z),0],[0,0,1]])
-        R = np.dot(R, np.dot(Rx, np.dot(Ry,Rz)))
-        Ko[0:3,0:3] = R
-        Ko[2,3] += g_tz
-        Ki[0,0] += g_focal
-        Ki[1,1] += g_focal
+            # Update rotation matrices
+            Rx = cv2.Rodrigues(np.array([np.radians(self.theta_x), 0, 0]))[0]
+            Ry = cv2.Rodrigues(np.array([0, np.radians(self.theta_y), 0]))[0]
+            Rz = cv2.Rodrigues(np.array([0, 0, np.radians(self.theta_z)]))[0]
+            R = Ko[:3, :3] @ Rx @ Ry @ Rz
+            Ko[:3, :3] = R
 
-        img = cv2.imread(args.img)
-        # x取值范围0-10，间隔0.1
-        for x in np.arange(0,10,0.5):
-            for y in np.arange(-5,5,0.5):
-                u,v = xy2uv(x,y,Ki,Ko)
-                cv2.circle(img, (u,v), 3, (0,255,0), -1)
+            # Update translation and focal length
+            Ko[2, 3] += self.tz
+            Ki[0, 0] += self.focal
+            Ki[1, 1] += self.focal
 
-        # 修改img的大小
-        img = cv2.resize(img, (int(width*0.5),int(height*0.5)))
-        cv2.imshow('img', img)
-        key = cv2.waitKey(50)
-        if key == ord('q'):
-            break
+            # Draw points on the image
+            img_copy = self.original_img.copy()
+            for x in np.arange(0, 10, 0.5):
+                for y in np.arange(-5, 5, 0.5):
+                    try:
+                        u, v = self.compute_uv(x, y, Ki, Ko)
+                        cv2.circle(img_copy, (u, v), 3, (0, 255, 0), -1)
+                    except Exception:
+                        continue  # Skip points that result in invalid pixel coordinates
 
-    with open(args.cam_para, 'w') as f:
-        f.write("RotationMatrices\n")
-        for i in range(3):
-            for j in range(3):
-                f.write(str(R[i,j])+" ")
-            f.write("\n")
-        f.write("\nTranslationVectors\n")
-        for i in range(3):
-            f.write(str(int(Ko[i,3]*1000))+" ")
-        f.write("\n\nIntrinsicMatrix\n")
-        for i in range(3):
-            for j in range(3):
-                f.write(str(int(Ki[i,j]))+" ")
-            f.write("\n")
+            # Display the image
+            resized_img = cv2.resize(img_copy, (self.width // 2, self.height // 2))
+            cv2.imshow('img', resized_img)
+            if cv2.waitKey(50) == ord('q'):
+                self.save_parameters(Ki, Ko)
+                break
+
+    def save_parameters(self, Ki, Ko):
+        with open(self.output_file, 'w') as f:
+            f.write("RotationMatrices\n")
+            for row in Ko[:3, :3]:
+                f.write(' '.join(f"{val:.6f}" for val in row) + "\n")
+            f.write("\nTranslationVectors\n")
+            f.write(' '.join(f"{int(val * 1000)}" for val in Ko[:3, 3]) + "\n")
+            f.write("\nIntrinsicMatrix\n")
+            for row in Ki[:3, :3]:
+                f.write(' '.join(f"{int(val)}" for val in row) + "\n")
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Estimate camera parameters from a video frame.')
+    parser.add_argument('--video', type=str, required=True, help='Path to the video file')
+    parser.add_argument('--cam_para', type=str, required=True, help='Path to save the camera parameters file')
+    args = parser.parse_args()
+
+    # Capture the 100th frame from the video
+    cap = cv2.VideoCapture(args.video)
+    if not cap.isOpened():
+        print(f"Error: Cannot open video file {args.video}")
+        return
+
+    cap.set(cv2.CAP_PROP_POS_FRAMES, 99)
+    ret, frame = cap.read()
+    cap.release()
+    if not ret:
+        print(f"Error: Cannot read frame 100 from {args.video}")
+        return
+
+    # Initialize and run the adjuster
+    adjuster = CameraParameterAdjuster(frame, args.cam_para)
+    adjuster.run()
+    cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":
-
-    parser = argparse.ArgumentParser(description='Process some arguments.')
-    parser.add_argument('--img', type=str, required= True,help='The image file ')
-    parser.add_argument('--cam_para', type=str, required= True,help='The estimated camera parameters file ')
-    args = parser.parse_args()
-    main(args)
+    main()
