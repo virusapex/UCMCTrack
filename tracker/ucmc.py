@@ -1,7 +1,6 @@
 import numpy as np
 from lap import lapjv
 import line_profiler
-from numba import njit
 from .kalman import KalmanTracker, TrackStatus
 
 
@@ -101,34 +100,60 @@ class UCMCTrack:
             return
 
         # Prepare detection observations and covariances
-        det_observations = np.array([dets[idx].y.flatten() for idx in det_indices])
-        det_covariances = np.array([dets[idx].R for idx in det_indices])
-
+        det_observations = np.array([dets[idx].y for idx in det_indices]).reshape(-1, 2)
+        det_covariances = np.array([dets[idx].R for idx in det_indices])             # Shape: (num_dets, 2, 2)
         # Prepare track predictions and covariances
-        track_predictions = np.array([self.trackers[idx].kf.H @ self.trackers[idx].kf.x for idx in track_indices])
-        track_covariances = np.array([self.trackers[idx].kf.H @ self.trackers[idx].kf.P @ self.trackers[idx].kf.H.T for idx in track_indices])
+        track_predictions = np.array([[self.trackers[idx].kf.x[0], self.trackers[idx].kf.x[2]] for idx in track_indices])  # Shape: (num_tracks, 2)
+        track_covariances = np.array([[[self.trackers[idx].kf.P[0, 0], self.trackers[idx].kf.P[0, 2]], [self.trackers[idx].kf.P[2, 0], self.trackers[idx].kf.P[2, 2]]] for idx in track_indices])  # Shape: (num_tracks, 2, 2)
+
+        # Compute differences between detections and tracks
+        diff = det_observations[:, np.newaxis, :] - track_predictions[np.newaxis, :, :]  # Shape: (num_dets, num_tracks, 2)
+
+        # Compute combined covariance matrices S for all detection-track pairs
+        S = det_covariances[:, np.newaxis, :, :] + track_covariances[np.newaxis, :, :, :]  # Shape: (num_dets, num_tracks, 2, 2)
+
+        # Add a small epsilon to the diagonal to ensure positive definiteness
+        epsilon = 1e-6
+        S[:, :, 0, 0] += epsilon
+        S[:, :, 1, 1] += epsilon
+
+        # Compute determinant of S
+        detS = S[:, :, 0, 0] * S[:, :, 1, 1] - S[:, :, 0, 1] * S[:, :, 1, 0]  # Shape: (num_dets, num_tracks)
+
+        # Handle potential zeros or negative values in detS
+        detS = np.where(detS <= 0, epsilon, detS)
+        inv_detS = 1.0 / detS
+
+        # Compute inverse of S
+        SI = np.empty_like(S)
+        SI[:, :, 0, 0] =  S[:, :, 1, 1] * inv_detS
+        SI[:, :, 0, 1] = -S[:, :, 0, 1] * inv_detS
+        SI[:, :, 1, 0] = -S[:, :, 1, 0] * inv_detS
+        SI[:, :, 1, 1] =  S[:, :, 0, 0] * inv_detS
+
+        # # Compute Mahalanobis distances
+        # mahalanobis = np.einsum('ijk, ijkl, ijk->ij', diff, SI, diff)  # Shape: (num_dets, num_tracks)
+        # Compute Mahalanobis distances
+        diff_expanded = diff[:, :, :, np.newaxis]  # Shape: (num_dets, num_tracks, 2, 1)
+        mahalanobis = np.matmul(np.transpose(diff_expanded, (0, 1, 3, 2)), SI @ diff_expanded)  # Shape: (num_dets, num_tracks, 1, 1)
+        mahalanobis = mahalanobis[:, :, 0, 0]  # Shape: (num_dets, num_tracks)
+        # Compute log determinant
+        logdet = np.log(detS)  # Shape: (num_dets, num_tracks)
 
         # Compute cost matrix
-        num_dets = len(det_indices)
-        num_tracks = len(track_indices)
-        cost_matrix = np.zeros((num_dets, num_tracks))
+        cost_matrix = mahalanobis + logdet  # Shape: (num_dets, num_tracks)
 
-        for i in range(num_dets):
-            y = det_observations[i]
-            R = det_covariances[i]
-            diff = y - track_predictions.reshape(num_tracks, -1)
-            S = track_covariances + R
-            SI = np.linalg.inv(S)
-            mahalanobis = np.einsum('ij,ijk,ik->i', diff, SI, diff)
-            logdet = np.log(np.linalg.det(S))
-            cost_matrix[i] = mahalanobis + logdet
+        # Apply gating to eliminate unlikely matches (optional)
+        # gating_threshold = some_value  # You can define a gating threshold
+        # cost_matrix[cost_matrix > gating_threshold] = np.inf
 
+        # Solve the assignment problem
         matched_indices, unmatched_dets, unmatched_tracks = linear_assignment(cost_matrix, threshold)
 
         # Process matched detections and tracks
-        for i, j in matched_indices:
-            det_idx = det_indices[i]
-            trk_idx = track_indices[j]
+        for det_idx_i, trk_idx_j in matched_indices:
+            det_idx = det_indices[det_idx_i]
+            trk_idx = track_indices[trk_idx_j]
             track = self.trackers[trk_idx]
             track.update(dets[det_idx].y, dets[det_idx].R)
             track.death_count = 0
@@ -140,8 +165,8 @@ class UCMCTrack:
         if is_high_score:
             self.detidx_remain.extend(det_indices[i] for i in unmatched_dets)
         else:
-            for i in unmatched_tracks:
-                trk_idx = track_indices[i]
+            for trk_idx_i in unmatched_tracks:
+                trk_idx = track_indices[trk_idx_i]
                 track = self.trackers[trk_idx]
                 track.status = TrackStatus.Coasted
                 track.detidx = -1
