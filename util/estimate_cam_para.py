@@ -36,18 +36,18 @@ class CameraParameterAdjuster:
         cv2.namedWindow('CamParaSettings')
 
         # Create trackbars
-        cv2.createTrackbar('theta_x', 'CamParaSettings', 250, 500, self.update_theta_x)
-        cv2.createTrackbar('theta_y', 'CamParaSettings', 250, 500, self.update_theta_y)
+        cv2.createTrackbar('theta_x', 'CamParaSettings', 0, 1000, self.update_theta_x)
+        cv2.createTrackbar('theta_y', 'CamParaSettings', 0, 1000, self.update_theta_y)
         cv2.createTrackbar('theta_z', 'CamParaSettings', 500, 1000, self.update_theta_z)
-        cv2.createTrackbar('focal', 'CamParaSettings', 100, 500, self.update_focal)
-        cv2.createTrackbar('Tz', 'CamParaSettings', 30, 500, self.update_tz)
+        cv2.createTrackbar('focal', 'CamParaSettings', 100, 1500, self.update_focal)
+        cv2.createTrackbar('Tz', 'CamParaSettings', 30, 1500, self.update_tz)
 
     def update_theta_x(self, val):
-        self.theta_x = (val - 250) / 10.0
+        self.theta_x = (val - 500) / 10.0
         self.display_values()
 
     def update_theta_y(self, val):
-        self.theta_y = (val - 250) / 10.0
+        self.theta_y = (val - 500) / 10.0
         self.display_values()
 
     def update_theta_z(self, val):

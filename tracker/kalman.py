@@ -17,14 +17,14 @@ class NumbaKalmanFilter:
         self.x = x        # State estimate
 
     @staticmethod
-    @njit
+    # @njit
     def predict(F, x, P, Q):
         x = F @ x
         P = F @ P @ F.T + Q
         return x, P
 
     @staticmethod
-    @njit
+    # @njit
     def update(x, P, z, R, H):
         y = z - H @ x  # Measurement residual
         S = H @ P @ H.T + R  # Residual covariance
